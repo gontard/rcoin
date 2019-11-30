@@ -1,8 +1,9 @@
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use std::time::SystemTime;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Block {
     index: u32,
     hash: String,
@@ -17,7 +18,7 @@ impl Block {
             index: 0,
             hash: "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7".to_string(),
             previous_hash: None,
-            timestamp: 1465154705,
+            timestamp: 1_465_154_705,
             data: "'my genesis block!!'".to_string(),
         }
     }
@@ -59,9 +60,9 @@ impl Block {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BlockChain {
-    pub vec: Vec<Block>,
+    vec: Vec<Block>,
 }
 
 impl BlockChain {
@@ -69,6 +70,10 @@ impl BlockChain {
         BlockChain {
             vec: vec![Block::genesis()],
         }
+    }
+
+    pub fn blocks(&self) -> &Vec<Block> {
+        &self.vec
     }
 
     fn latest_block(&self) -> &Block {
@@ -122,7 +127,5 @@ fn now_as_secs() -> u64 {
     let since_the_epoch = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("Time went backwards");
-    return since_the_epoch.as_secs();
+    since_the_epoch.as_secs()
 }
-
-//pub fn generate_next_block(block: )
