@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use sha2::{Digest, Sha256};
 
 use std::time::SystemTime;
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Block {
     index: u32,
     hash: String,
@@ -13,7 +13,7 @@ pub struct Block {
 }
 
 impl Block {
-    fn genesis() -> Block {
+    fn genesis() -> Self {
         Block {
             index: 0,
             hash: "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7".to_string(),
@@ -23,7 +23,7 @@ impl Block {
         }
     }
 
-    fn new(index: u32, hash: String, previous_hash: String, timestamp: u64, data: String) -> Block {
+    fn new(index: u32, hash: String, previous_hash: String, timestamp: u64, data: String) -> Self {
         Block {
             index,
             hash,
@@ -33,7 +33,7 @@ impl Block {
         }
     }
 
-    fn is_previous_hash(&self, hash: &String) -> bool {
+    fn is_previous_hash(&self, hash: &str) -> bool {
         let previous_hash = self.previous_hash.as_ref();
         match previous_hash {
             Some(previous_hash) => previous_hash == hash,
@@ -66,7 +66,7 @@ pub struct BlockChain {
 }
 
 impl BlockChain {
-    pub fn new() -> BlockChain {
+    pub fn new() -> Self {
         BlockChain {
             vec: vec![Block::genesis()],
         }
@@ -81,7 +81,7 @@ impl BlockChain {
         self.vec.last().unwrap()
     }
 
-    pub fn generate_next_block(&mut self, data: String) {
+    pub fn generate_next_block(&mut self, data: String) -> Block {
         let previous = self.latest_block();
         let next_index = (*previous).index + 1;
         let next_timestamp = now_as_secs();
@@ -93,7 +93,9 @@ impl BlockChain {
             next_timestamp,
             data,
         );
+        let result = next_block.clone();
         self.vec.push(next_block);
+        result
     }
 
     pub fn replace_chain(&mut self, new_blocks: Vec<Block>) -> bool {
@@ -109,9 +111,17 @@ impl BlockChain {
         }
         is_valid
     }
+
+    pub fn add_block(&mut self, new_block: Block) -> bool {
+        if !self.latest_block().is_valid_next_block(&new_block) {
+            return false
+        }
+        self.vec.push(new_block);
+        true
+    }
 }
 
-pub fn calculate_hash(index: u32, previous_hash: &String, timestamp: u64, data: &String) -> String {
+pub fn calculate_hash(index: u32, previous_hash: &str, timestamp: u64, data: &str) -> String {
     let hasher = Sha256::new();
     let result = hasher
         .chain(index.to_ne_bytes())
