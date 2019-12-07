@@ -1,14 +1,18 @@
-use futures::{future::poll_fn, sync::mpsc};
-use rcoin::{Block, BlockChain};
-use reqwest::r#async::Client;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Cursor};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+
+use futures::{future::poll_fn, sync::mpsc};
+use log::{debug, trace, warn};
+use reqwest::r#async::Client;
+use serde::{Deserialize, Serialize};
+use structopt::StructOpt;
 use warp::{body, get2, http::StatusCode, path, sse::ServerSentEvent, Buf, Filter, Future, Stream};
+
+use rcoin::{Block, BlockChain};
 
 #[derive(Debug, Deserialize)]
 struct BlockData {
@@ -52,18 +56,23 @@ impl RCoin {
     }
 
     fn notify_peers(&self, msg: SyncMessage) {
-        self.peers.iter().for_each(|(peer_id, tx)| {
-            println!("send to {}", peer_id);
-            match tx.unbounded_send(msg.clone()) {
+        debug!("notify {} peers", self.peers.len());
+        self.peers
+            .iter()
+            .for_each(|(peer_id, tx)| match tx.unbounded_send(msg.clone()) {
                 Ok(()) => {
-                    println!("msg sent to {}", peer_id);
+                    trace!("msg sent to {}", peer_id);
                 }
                 Err(err) => {
-                    println!("error sending msg to {}  {}", peer_id, err);
+                    warn!("error sending msg to {}  {}", peer_id, err);
                 }
-            }
-        });
+            });
     }
+}
+
+#[derive(Debug, StructOpt)]
+struct Opt {
+    port: u16,
 }
 
 type RCoinState = Arc<Mutex<RCoin>>;
@@ -72,12 +81,7 @@ static NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn main() {
     pretty_env_logger::init();
-
-    let port: u16 = std::env::args()
-        .nth(1)
-        .expect("no port given")
-        .parse()
-        .expect("invalid port");
+    let opt: Opt = Opt::from_args();
 
     let state: RCoinState = Arc::new(Mutex::new(RCoin::new()));
     let state = warp::any().map(move || state.clone());
@@ -118,7 +122,7 @@ fn main() {
     let api = get_blocks.or(post_block).or(post_peer).or(sync_sse);
     let routes = api.with(warp::log("rcoin"));
 
-    warp::serve(routes).run(([127, 0, 0, 1], port));
+    warp::serve(routes).run(([127, 0, 0, 1], opt.port));
 }
 
 fn list_blocks(state: RCoinState) -> impl warp::Reply {
@@ -133,7 +137,7 @@ fn mine_block(
     let mut rcoin = state.lock().unwrap();
     let block = rcoin.block_chain.generate_next_block(block_data.data);
 
-    println!("mine_block, peers count {}", rcoin.peers.len());
+    debug!("block mined: {:?}", block);
     rcoin.notify_peers(SyncMessage::BlockMined(block));
     Ok(StatusCode::CREATED)
 }
@@ -144,13 +148,13 @@ fn mine_block(
 //}
 
 fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, warp::Rejection> {
+    debug!("connect to peer {:?}", peer);
     let request = Client::new()
         .get(&peer.url())
         .header("accept", "text/event-stream")
         .send()
         .and_then(move |response| {
             response.into_body().for_each(move |chunk| {
-                println!("{:#?}", chunk);
                 let cursor: Cursor<&[u8]> = Cursor::new(chunk.bytes());
                 let mut block: Option<Block> = None;
                 for line in cursor.lines().map(|l| l.unwrap()) {
@@ -160,6 +164,7 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
                 }
                 match block {
                     Some(block) => {
+                        debug!("received block {:?} from {:?}", peer, block);
                         let mut rcoin = state.lock().unwrap();
                         rcoin.add_block(block);
                     }
@@ -168,7 +173,7 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
                 futures::future::ok(())
             })
         })
-        .map_err(|err| println!("err {:#?}", err));
+        .map_err(|err| warn!("error on the event stream {:?}", err));
     warp::spawn(request);
 
     Ok(StatusCode::CREATED)
@@ -179,7 +184,7 @@ fn peer_connected(
 ) -> impl Stream<Item = impl ServerSentEvent + Send + 'static, Error = warp::Error> + Send + 'static
 {
     let peer_id = NEXT_PEER_ID.fetch_add(1, Ordering::Relaxed);
-    println!("peer_connected {}", peer_id);
+    debug!("peer connected {}", peer_id);
 
     // Use an unbounded channel to handle buffering and flushing of messages
     // to the event source...
@@ -212,7 +217,7 @@ fn peer_connected(
 }
 
 fn peer_disconnected(my_id: usize, state: &RCoinState) {
-    println!("good bye peer: {}", my_id);
+    debug!("good bye peer: {}", my_id);
 
     // Stream closed up, so remove from the user list
     state.lock().unwrap().peers.remove(&my_id);
