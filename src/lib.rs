@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use std::time::SystemTime;
@@ -114,7 +114,7 @@ impl BlockChain {
 
     pub fn add_block(&mut self, new_block: Block) -> bool {
         if !self.latest_block().is_valid_next_block(&new_block) {
-            return false
+            return false;
         }
         self.vec.push(new_block);
         true

@@ -66,7 +66,6 @@ impl RCoin {
     }
 }
 
-
 type RCoinState = Arc<Mutex<RCoin>>;
 /// Our global unique peer id counter.
 static NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(1);
@@ -74,7 +73,11 @@ static NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(1);
 fn main() {
     pretty_env_logger::init();
 
-    let port: u16 = std::env::args().nth(1).expect("no port given").parse().expect("invalid port");
+    let port: u16 = std::env::args()
+        .nth(1)
+        .expect("no port given")
+        .parse()
+        .expect("invalid port");
 
     let state: RCoinState = Arc::new(Mutex::new(RCoin::new()));
     let state = warp::any().map(move || state.clone());
@@ -146,7 +149,7 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
         .header("accept", "text/event-stream")
         .send()
         .and_then(move |response| {
-            response.into_body().for_each(move|chunk| {
+            response.into_body().for_each(move |chunk| {
                 println!("{:#?}", chunk);
                 let cursor: Cursor<&[u8]> = Cursor::new(chunk.bytes());
                 let mut block: Option<Block> = None;
@@ -160,7 +163,7 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
                         let mut rcoin = state.lock().unwrap();
                         rcoin.add_block(block);
                     }
-                    None => ()
+                    None => (),
                 }
                 futures::future::ok(())
             })
