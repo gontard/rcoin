@@ -72,8 +72,36 @@ impl RCoinNode {
             .send()
     }
 
+    fn assert_blocks_count(&self, count: usize) -> Result<(), Error> {
+        let blocks = self.get_blocks()?.text()?;
+        assert_eq!(true, contains_n_blocks(count).eval(&blocks));
+        assert_eq!(false, contains_n_blocks(count + 1).eval(&blocks));
+        Ok(())
+    }
+
+    fn assert_blocks_contains(&self, pattern: &str) -> Result<(), Error> {
+        let blocks = self.get_blocks()?.text()?;
+        assert_eq!(true, predicate::str::contains(pattern).eval(&blocks));
+        Ok(())
+    }
+
+    fn assert_sync_with_node(&self, other_node: &RCoinNode) -> Result<(), Error> {
+        let blocks = self.get_blocks()?.text()?;
+        let other_blocks = other_node.get_blocks()?.text()?;
+        assert_eq!(blocks, other_blocks);
+        Ok(())
+    }
+
     fn stop(&mut self) -> std::io::Result<()> {
         self.child_process.kill()
+    }
+}
+
+impl Drop for RCoinNode {
+    fn drop(&mut self) {
+        if let Err(err) = self.stop() {
+            println!("error {:?}", err)
+        }
     }
 }
 
@@ -85,63 +113,48 @@ fn contains_n_blocks(n: usize) -> ContainsPredicate {
     predicate::str::contains(format!(r#""index":{}"#, n - 1))
 }
 
-#[test]
-fn control_one_node() -> Result<(), Box<dyn std::error::Error>> {
-    let mut node = RCoinNode::start(17000);
+type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    let node_blocks = node.get_blocks()?.text()?;
-    assert_eq!(true, contains_n_blocks(1).eval(&node_blocks));
+#[test]
+fn control_one_node() -> TestResult {
+    let node = RCoinNode::start(17000);
+
+    node.assert_blocks_count(1)?;
 
     node.mine_block("The first block data")?;
-    let node_blocks = node.get_blocks()?.text()?;
-    assert_eq!(true, contains_n_blocks(2).eval(&node_blocks));
-    assert_eq!(
-        true,
-        predicate::str::contains("The first block data").eval(&node_blocks)
-    );
+
+    node.assert_blocks_count(2)?;
+    node.assert_blocks_contains("The first block data")?;
 
     node.mine_block("The second block data")?;
-    let node_blocks = node.get_blocks()?.text()?;
-    assert_eq!(true, contains_n_blocks(3).eval(&node_blocks));
-    assert_eq!(
-        true,
-        predicate::str::contains("The second block data").eval(&node_blocks)
-    );
 
-    node.stop()?;
+    node.assert_blocks_count(3)?;
+    node.assert_blocks_contains("The second block data")?;
 
     Ok(())
 }
 
 #[test]
-fn sync_two_nodes() -> Result<(), Box<dyn std::error::Error>> {
-    let mut node1 = RCoinNode::start(17001);
-    let mut node2 = RCoinNode::start(17002);
+fn connect_two_nodes_then_mine_some_blocks() -> TestResult {
+    let node1 = RCoinNode::start(17001);
+    let node2 = RCoinNode::start(17002);
 
     node2.listen_other_node(&node1)?;
     node1.mine_block("The first block data")?;
     node1.mine_block("The second block data")?;
     node1.mine_block("The third block data")?;
 
-    let node1_blocks = node1.get_blocks()?.text()?;
-    let node2_blocks = node2.get_blocks()?.text()?;
-
-    node1.stop()?;
-    node2.stop()?;
-
-    let contains_two_blocks = contains_n_blocks(3);
-    assert_eq!(true, contains_two_blocks.eval(&node1_blocks));
-    assert_eq!(true, contains_two_blocks.eval(&node2_blocks));
-    assert_eq!(&node1_blocks, &node2_blocks);
+    node1.assert_blocks_count(4)?;
+    node2.assert_sync_with_node(&node1)?;
 
     Ok(())
 }
 
 #[test]
-fn sync_three_nodes_in_chain() -> Result<(), Box<dyn std::error::Error>> {
-    let mut node1 = RCoinNode::start(17003);
-    let mut node2 = RCoinNode::start(17004);
-    let mut node3 = RCoinNode::start(17005);
+fn connect_three_nodes_in_a_chain_then_mine_some_blocks() -> TestResult {
+    let node1 = RCoinNode::start(17003);
+    let node2 = RCoinNode::start(17004);
+    let node3 = RCoinNode::start(17005);
 
     node2.listen_other_node(&node1)?;
     node3.listen_other_node(&node2)?;
@@ -152,22 +165,30 @@ fn sync_three_nodes_in_chain() -> Result<(), Box<dyn std::error::Error>> {
     let node2_blocks = node2.get_blocks()?.text()?;
     let node3_blocks = node3.get_blocks()?.text()?;
 
-    node1.stop()?;
-    node2.stop()?;
-    node3.stop()?;
-
-    let contains_two_blocks = contains_n_blocks(2);
-    assert_eq!(true, contains_two_blocks.eval(&node1_blocks));
-    assert_eq!(true, contains_two_blocks.eval(&node2_blocks));
-    assert_eq!(true, contains_two_blocks.eval(&node3_blocks));
-    assert_eq!(&node1_blocks, &node2_blocks);
-    assert_eq!(&node2_blocks, &node3_blocks);
+    node1.assert_blocks_count(3)?;
+    node2.assert_sync_with_node(&node1)?;
+    node3.assert_sync_with_node(&node1)?;
 
     Ok(())
 }
 
 #[test]
-fn error_port_not_specified() -> Result<(), Box<dyn std::error::Error>> {
+fn mine_some_blocks_then_connect_a_node() -> TestResult {
+    let node1 = RCoinNode::start(17006);
+    let node2 = RCoinNode::start(17007);
+
+    node1.mine_block("The first block data")?;
+    node2.listen_other_node(&node1)?;
+    node1.mine_block("The second block data")?;
+
+    node1.assert_blocks_count(3)?;
+    node2.assert_sync_with_node(&node1)?;
+
+    Ok(())
+}
+
+#[test]
+fn error_port_not_specified() -> TestResult {
     let mut cmd = Command::cargo_bin("rcoin")?;
 
     cmd.assert()
@@ -181,7 +202,7 @@ fn error_port_not_specified() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn error_port_is_not_an_int() -> Result<(), Box<dyn std::error::Error>> {
+fn error_port_is_not_an_int() -> TestResult {
     let mut cmd = Command::cargo_bin("rcoin")?;
 
     cmd.arg("abc")
@@ -196,7 +217,7 @@ fn error_port_is_not_an_int() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn error_port_too_large() -> Result<(), Box<dyn std::error::Error>> {
+fn error_port_too_large() -> TestResult {
     let mut cmd = Command::cargo_bin("rcoin")?;
 
     cmd.arg("100000000000000000")

@@ -182,7 +182,7 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
                         fetch_peer_blocks(&peer, state.clone())
                     }
                 }
-                return futures::future::ok(());
+                futures::future::ok(())
             })
         })
         .map_err(|err| warn!("error on the event stream {:?}", err));
@@ -204,7 +204,6 @@ fn fetch_peer_blocks(peer: &Peer, state: RCoinState) {
             } else {
                 debug!("new blocks can't be added");
             }
-            ()
         })
         .map_err(|err| warn!("error on the event stream {:?}", err));
     warp::spawn(request);
