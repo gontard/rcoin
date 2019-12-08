@@ -76,7 +76,7 @@ impl BlockChain {
         &self.vec
     }
 
-    fn latest_block(&self) -> &Block {
+    pub fn latest_block(&self) -> &Block {
         // safe because there is the genesis block at least
         self.vec.last().unwrap()
     }

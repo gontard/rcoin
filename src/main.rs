@@ -6,8 +6,8 @@ use std::sync::{
 };
 
 use futures::{future::poll_fn, sync::mpsc};
-use log::{debug, trace, warn};
-use reqwest::r#async::Client;
+use log::{debug, warn};
+use reqwest::r#async::{Client, Response};
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use warp::{body, get2, http::StatusCode, path, sse::ServerSentEvent, Buf, Filter, Future, Stream};
@@ -26,8 +26,11 @@ struct Peer {
 }
 
 impl Peer {
-    fn url(&self) -> String {
+    fn sync_url(&self) -> String {
         format!("http://{}:{}/sync", self.hostname, self.port)
+    }
+    fn get_blocks_url(&self) -> String {
+        format!("http://{}:{}/blocks", self.hostname, self.port)
     }
 }
 
@@ -49,24 +52,31 @@ impl RCoin {
         }
     }
 
-    fn add_block(&mut self, block: Block) {
+    fn add_block(&mut self, block: Block) -> bool {
         if self.block_chain.add_block(block.clone()) {
-            self.notify_peers(SyncMessage::BlockMined(block))
+            self.notify_peers(SyncMessage::BlockMined(block));
+            return true;
         }
+        false
+    }
+
+    fn replace_chain(&mut self, blocks: Vec<Block>) -> bool {
+        if self.block_chain.replace_chain(blocks) {
+            self.notify_peers(SyncMessage::BlockMined(
+                self.block_chain.latest_block().clone(),
+            ));
+            return true;
+        }
+        false
     }
 
     fn notify_peers(&self, msg: SyncMessage) {
         debug!("notify {} peers", self.peers.len());
-        self.peers
-            .iter()
-            .for_each(|(peer_id, tx)| match tx.unbounded_send(msg.clone()) {
-                Ok(()) => {
-                    trace!("msg sent to {}", peer_id);
-                }
-                Err(err) => {
-                    warn!("error sending msg to {}  {}", peer_id, err);
-                }
-            });
+        self.peers.iter().for_each(|(peer_id, tx)| {
+            if let Err(err) = tx.unbounded_send(msg.clone()) {
+                warn!("error sending msg to {}  {}", peer_id, err);
+            }
+        });
     }
 }
 
@@ -91,14 +101,16 @@ fn main() {
     let get_blocks = get2().and(blocks_index).and(state.clone()).map(list_blocks);
     let post_block = warp::post2()
         .and(blocks_index)
-        .and(body::content_length_limit(1024 * 16).and(body::json()))
+        .and(body::content_length_limit(1024 * 16))
+        .and(body::json())
         .and(state.clone())
         .and_then(mine_block);
 
     //    let get_peers = get2().and(peers_index).and(state.clone()).map(list_peers);
     let post_peer = warp::post2()
         .and(peers_index)
-        .and(body::content_length_limit(1024 * 16).and(body::json()))
+        .and(body::content_length_limit(1024 * 16))
+        .and(body::json())
         .and(state.clone())
         .and_then(connect_to_peer);
 
@@ -150,7 +162,7 @@ fn mine_block(
 fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, warp::Rejection> {
     debug!("connect to peer {:?}", peer);
     let request = Client::new()
-        .get(&peer.url())
+        .get(&peer.sync_url())
         .header("accept", "text/event-stream")
         .send()
         .and_then(move |response| {
@@ -162,21 +174,40 @@ fn connect_to_peer(peer: Peer, state: RCoinState) -> Result<impl warp::Reply, wa
                         block = serde_json::from_str(&line[5..]).ok();
                     }
                 }
-                match block {
-                    Some(block) => {
-                        debug!("received block {:?} from {:?}", peer, block);
-                        let mut rcoin = state.lock().unwrap();
-                        rcoin.add_block(block);
+                if let Some(block) = block {
+                    debug!("received block {:?} from {:?}", peer, block);
+                    let mut rcoin = state.lock().unwrap();
+                    if !rcoin.add_block(block) {
+                        warn!("block can't be added, let's fetch all the blocks");
+                        fetch_peer_blocks(&peer, state.clone())
                     }
-                    None => (),
                 }
-                futures::future::ok(())
+                return futures::future::ok(());
             })
         })
         .map_err(|err| warn!("error on the event stream {:?}", err));
     warp::spawn(request);
 
     Ok(StatusCode::CREATED)
+}
+
+fn fetch_peer_blocks(peer: &Peer, state: RCoinState) {
+    let json = |mut res: Response| res.json::<Vec<Block>>();
+    let request = Client::new()
+        .get(&peer.get_blocks_url())
+        .send()
+        .and_then(json)
+        .map(move |blocks: Vec<Block>| {
+            let mut rcoin = state.lock().unwrap();
+            if rcoin.replace_chain(blocks) {
+                debug!("replace all blocks by new ones");
+            } else {
+                debug!("new blocks can't be added");
+            }
+            ()
+        })
+        .map_err(|err| warn!("error on the event stream {:?}", err));
+    warp::spawn(request);
 }
 
 fn peer_connected(
@@ -201,7 +232,7 @@ fn peer_connected(
     let (mut dtx, mut drx) = futures::sync::oneshot::channel::<()>();
 
     // When `drx` will dropped then `dtx` will be canceled.
-    // We can track it to make sure when the user leaves chat.
+    // We can track it to make sure when the peer leaves.
     warp::spawn(poll_fn(move || dtx.poll_cancel()).map(move |_| {
         peer_disconnected(peer_id, &rcoin2);
     }));
