@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 
 use std::time::SystemTime;
 
+pub mod error;
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Block {
     index: u32,
@@ -58,6 +60,10 @@ impl Block {
             _ => true,
         }
     }
+
+    pub fn has_higher_index(&self, other_block: &Block) -> bool {
+        self.index > other_block.index
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -99,7 +105,6 @@ impl BlockChain {
     }
 
     pub fn replace_chain(&mut self, new_blocks: Vec<Block>) -> bool {
-        println!("{}", new_blocks.len() > self.vec.len());
         let is_valid = new_blocks.len() > self.vec.len()
             && new_blocks.first() == self.vec.first()
             && new_blocks

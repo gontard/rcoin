@@ -4,6 +4,7 @@ use predicates::str::ContainsPredicate;
 use reqwest::{Error, Response};
 use serde::Serialize;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 #[derive(Debug, Serialize)]
 struct BlockData {
@@ -20,9 +21,11 @@ struct RCoinNode {
     port: u16,
     child_process: Child,
 }
+static NEXT_PORT: AtomicU16 = AtomicU16::new(17000);
 
 impl RCoinNode {
-    fn start(port: u16) -> Self {
+    fn start() -> Self {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
         let child_process = Command::cargo_bin("rcoin")
             .unwrap()
             .arg(port.to_string())
@@ -46,10 +49,12 @@ impl RCoinNode {
     }
 
     fn listen_other_node(&self, other_node: &RCoinNode) -> Result<Response, Error> {
-        self.add_peer(&Peer {
+        let result = self.add_peer(&Peer {
             hostname: "localhost".to_string(),
             port: other_node.port,
-        })
+        });
+        wait_a_little_bit();
+        result
     }
 
     fn mine_block(&self, data: &str) -> Result<Response, Error> {
@@ -117,7 +122,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn control_one_node() -> TestResult {
-    let node = RCoinNode::start(17000);
+    let node = RCoinNode::start();
 
     node.assert_blocks_count(1)?;
 
@@ -136,8 +141,8 @@ fn control_one_node() -> TestResult {
 
 #[test]
 fn connect_two_nodes_then_mine_some_blocks() -> TestResult {
-    let node1 = RCoinNode::start(17001);
-    let node2 = RCoinNode::start(17002);
+    let node1 = RCoinNode::start();
+    let node2 = RCoinNode::start();
 
     node2.listen_other_node(&node1)?;
     node1.mine_block("The first block data")?;
@@ -152,20 +157,16 @@ fn connect_two_nodes_then_mine_some_blocks() -> TestResult {
 
 #[test]
 fn connect_three_nodes_in_a_chain_then_mine_some_blocks() -> TestResult {
-    let node1 = RCoinNode::start(17003);
-    let node2 = RCoinNode::start(17004);
-    let node3 = RCoinNode::start(17005);
+    let node1 = RCoinNode::start();
+    let node2 = RCoinNode::start();
+    let node3 = RCoinNode::start();
 
     node2.listen_other_node(&node1)?;
     node3.listen_other_node(&node2)?;
     node1.mine_block("The first block data")?;
-    node1.mine_block("The second block data")?;
+    //    node1.mine_block("The second block data")?;
 
-    let node1_blocks = node1.get_blocks()?.text()?;
-    let node2_blocks = node2.get_blocks()?.text()?;
-    let node3_blocks = node3.get_blocks()?.text()?;
-
-    node1.assert_blocks_count(3)?;
+    node1.assert_blocks_count(2)?;
     node2.assert_sync_with_node(&node1)?;
     node3.assert_sync_with_node(&node1)?;
 
@@ -174,15 +175,35 @@ fn connect_three_nodes_in_a_chain_then_mine_some_blocks() -> TestResult {
 
 #[test]
 fn mine_some_blocks_then_connect_a_node() -> TestResult {
-    let node1 = RCoinNode::start(17006);
-    let node2 = RCoinNode::start(17007);
+    let node1 = RCoinNode::start();
+    let node2 = RCoinNode::start();
 
     node1.mine_block("The first block data")?;
-    node2.listen_other_node(&node1)?;
     node1.mine_block("The second block data")?;
+    node2.listen_other_node(&node1)?;
 
     node1.assert_blocks_count(3)?;
     node2.assert_sync_with_node(&node1)?;
+
+    Ok(())
+}
+
+#[test]
+fn connect_one_node_to_two_nodes() -> TestResult {
+    let node1 = RCoinNode::start();
+    let node2 = RCoinNode::start();
+    let node3 = RCoinNode::start();
+
+    node3.listen_other_node(&node1)?;
+    node3.listen_other_node(&node2)?;
+
+    node1.mine_block("The first block data")?;
+    node2.mine_block("The second block data")?;
+    node3.mine_block("The third block data")?;
+
+    node1.assert_blocks_count(4)?;
+    node3.assert_sync_with_node(&node1)?;
+    node3.assert_sync_with_node(&node2)?;
 
     Ok(())
 }
