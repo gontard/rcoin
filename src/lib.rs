@@ -1,146 +1,135 @@
+use block_chain::{Block, BlockChain};
+use futures::sync::mpsc::UnboundedSender;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
-use std::time::SystemTime;
-
+pub mod block_chain;
 pub mod error;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct Block {
-    index: u32,
-    hash: String,
-    previous_hash: Option<String>,
-    timestamp: u64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncMessage {
+    QueryLastBlock(),
+    QueryBlockChain(),
+    ResponseLastBlock { block: Block },
+    ResponseBlockChain { blocks: Vec<Block> },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockData {
     data: String,
 }
 
-impl Block {
-    fn genesis() -> Self {
-        Block {
-            index: 0,
-            hash: "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7".to_string(),
-            previous_hash: None,
-            timestamp: 1_465_154_705,
-            data: "'my genesis block!!'".to_string(),
-        }
-    }
-
-    fn new(index: u32, hash: String, previous_hash: String, timestamp: u64, data: String) -> Self {
-        Block {
-            index,
-            hash,
-            previous_hash: Some(previous_hash),
-            timestamp,
-            data,
-        }
-    }
-
-    fn is_previous_hash(&self, hash: &str) -> bool {
-        let previous_hash = self.previous_hash.as_ref();
-        match previous_hash {
-            Some(previous_hash) => previous_hash == hash,
-            None => false,
-        }
-    }
-
-    fn is_hash_valid(&self) -> bool {
-        let empty = String::new();
-        let previous_has = self.previous_hash.as_ref().unwrap_or(&empty);
-        let data = &self.data;
-        let hash = calculate_hash(self.index, previous_has, self.timestamp, data);
-        hash == self.hash
-    }
-
-    fn is_valid_next_block(&self, next_block: &Block) -> bool {
-        match next_block {
-            Block { index, .. } if *index != self.index + 1 => false,
-            Block { previous_hash, .. } if previous_hash.is_none() => false,
-            block if !block.is_previous_hash(&self.hash) => false,
-            block if !block.is_hash_valid() => false,
-            _ => true,
-        }
-    }
-
-    pub fn has_higher_index(&self, other_block: &Block) -> bool {
-        self.index > other_block.index
-    }
+#[derive(Default)]
+pub struct RCoin {
+    block_chain: BlockChain,
+    peers: HashMap<usize, UnboundedSender<SyncMessage>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct BlockChain {
-    vec: Vec<Block>,
-}
-
-impl BlockChain {
+impl RCoin {
     pub fn new() -> Self {
-        BlockChain {
-            vec: vec![Block::genesis()],
-        }
+        Default::default()
     }
 
     pub fn blocks(&self) -> &Vec<Block> {
-        &self.vec
+        self.block_chain.blocks()
     }
 
-    pub fn latest_block(&self) -> &Block {
-        // safe because there is the genesis block at least
-        self.vec.last().unwrap()
+    pub fn generate_next_block(&mut self, block_data: BlockData) {
+        let block = self.block_chain.generate_next_block(block_data.data);
+        debug!("block mined: {:?}", block);
+        self.notify_peers(SyncMessage::ResponseLastBlock { block }, None);
     }
 
-    pub fn generate_next_block(&mut self, data: String) -> Block {
-        let previous = self.latest_block();
-        let next_index = (*previous).index + 1;
-        let next_timestamp = now_as_secs();
-        let next_hash = calculate_hash(next_index, &previous.hash, next_timestamp, &data);
-        let next_block = Block::new(
-            next_index,
-            next_hash,
-            previous.hash.clone(),
-            next_timestamp,
-            data,
-        );
-        let result = next_block.clone();
-        self.vec.push(next_block);
-        result
+    pub fn add_peer(&mut self, peer_id: usize, tx: UnboundedSender<SyncMessage>) {
+        self.peers.insert(peer_id, tx);
+        self.notify_peer(peer_id, SyncMessage::QueryLastBlock {});
     }
 
-    pub fn replace_chain(&mut self, new_blocks: Vec<Block>) -> bool {
-        let is_valid = new_blocks.len() > self.vec.len()
-            && new_blocks.first() == self.vec.first()
-            && new_blocks
-                .iter()
-                .zip(new_blocks.iter().skip(1))
-                .all(|(prev, current)| prev.is_valid_next_block(current));
-        if is_valid {
-            self.vec = new_blocks;
+    pub fn remove_peer(&mut self, peer_id: usize) {
+        debug!("good bye peer: {}", peer_id);
+
+        self.peers.remove(&peer_id);
+    }
+
+    pub fn received_block(&mut self, peer_id: usize, block: Block) {
+        if self.block_chain.add_block(block.clone()) {
+            self.notify_peers(SyncMessage::ResponseLastBlock { block }, Some(&peer_id));
+        } else if block.has_higher_index(self.block_chain.latest_block()) {
+            self.notify_peer(peer_id, SyncMessage::QueryBlockChain {});
         }
-        is_valid
     }
 
-    pub fn add_block(&mut self, new_block: Block) -> bool {
-        if !self.latest_block().is_valid_next_block(&new_block) {
-            return false;
+    pub fn received_block_chain(&mut self, peer_id: usize, blocks: Vec<Block>) {
+        if self.block_chain.replace_chain(blocks) {
+            self.notify_peers(
+                SyncMessage::ResponseLastBlock {
+                    block: self.block_chain.latest_block().clone(),
+                },
+                Some(&peer_id),
+            );
+        } else {
+            warn!("failed to replace block chain from {}", peer_id);
         }
-        self.vec.push(new_block);
-        true
     }
-}
 
-pub fn calculate_hash(index: u32, previous_hash: &str, timestamp: u64, data: &str) -> String {
-    let hasher = Sha256::new();
-    let result = hasher
-        .chain(index.to_ne_bytes())
-        .chain(previous_hash)
-        .chain(timestamp.to_ne_bytes())
-        .chain(data)
-        .result();
-    format!("{:x}", result)
-}
+    fn send_last_block(&self, peer_id: usize) {
+        self.peers.get(&peer_id).iter().for_each(|tx| {
+            if let Err(err) = tx.unbounded_send(SyncMessage::ResponseLastBlock {
+                block: self.block_chain.latest_block().clone(),
+            }) {
+                warn!("error sending msg to {}  {}", peer_id, err);
+            }
+        });
+    }
 
-fn now_as_secs() -> u64 {
-    let now = SystemTime::now();
-    let since_the_epoch = now
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("Time went backwards");
-    since_the_epoch.as_secs()
+    fn send_block_chain(&self, peer_id: usize) {
+        self.peers.get(&peer_id).iter().for_each(|tx| {
+            debug!("send block chain to {} peer", self.peers.len());
+            if let Err(err) = tx.unbounded_send(SyncMessage::ResponseBlockChain {
+                blocks: self.block_chain.blocks().clone(),
+            }) {
+                warn!("error sending msg to {}  {}", peer_id, err);
+            }
+        });
+    }
+
+    fn notify_peers(&self, msg: SyncMessage, exclude_peer_id: Option<&usize>) {
+        debug!("notify {} peers", self.peers.len());
+        self.peers
+            .iter()
+            .filter(|(peer_id, _)| match exclude_peer_id {
+                Some(excluded_id) => excluded_id != (*peer_id),
+                None => true,
+            })
+            .for_each(|(peer_id, tx)| {
+                if let Err(err) = tx.unbounded_send(msg.clone()) {
+                    warn!("error sending msg to {}  {}", peer_id, err);
+                }
+            });
+    }
+
+    fn notify_peer(&self, peer_id: usize, msg: SyncMessage) {
+        self.peers.get(&peer_id).iter().for_each(|tx| {
+            if let Err(err) = tx.unbounded_send(msg.clone()) {
+                warn!("error sending msg to {}  {}", peer_id, err);
+            }
+        });
+    }
+
+    pub fn peer_message_received(&mut self, peer_id: usize, msg: SyncMessage) {
+        debug!("peer {} msg {:?}", peer_id, msg);
+        match msg {
+            SyncMessage::QueryLastBlock() => {
+                self.send_last_block(peer_id);
+            }
+            SyncMessage::QueryBlockChain() => {
+                self.send_block_chain(peer_id);
+            }
+            SyncMessage::ResponseLastBlock { block } => self.received_block(peer_id, block),
+            SyncMessage::ResponseBlockChain { blocks } => {
+                self.received_block_chain(peer_id, blocks)
+            }
+        }
+    }
 }

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -12,13 +11,8 @@ use warp::Filter;
 
 use rcoin::{
     error::{Error, Kind},
-    Block, BlockChain,
+    BlockData, RCoin, SyncMessage,
 };
-
-#[derive(Debug, Deserialize)]
-struct BlockData {
-    data: String,
-}
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Peer {
@@ -29,125 +23,6 @@ struct Peer {
 impl Peer {
     fn sync_url(&self) -> String {
         format!("ws://{}:{}/sync-ws", self.hostname, self.port)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum SyncMessage {
-    QueryLastBlock(),
-    QueryBlockChain(),
-    ResponseLastBlock { block: Block },
-    ResponseBlockChain { blocks: Vec<Block> },
-}
-
-struct RCoin {
-    block_chain: BlockChain,
-    peers: HashMap<usize, mpsc::UnboundedSender<SyncMessage>>,
-}
-
-impl RCoin {
-    fn new() -> RCoin {
-        RCoin {
-            block_chain: BlockChain::new(),
-            peers: HashMap::new(),
-        }
-    }
-
-    fn generate_next_block(&mut self, block_data: BlockData) {
-        let block = self.block_chain.generate_next_block(block_data.data);
-        debug!("block mined: {:?}", block);
-        self.notify_peers(SyncMessage::ResponseLastBlock { block }, None);
-    }
-
-    fn add_peer(&mut self, peer_id: usize, tx: mpsc::UnboundedSender<SyncMessage>) {
-        self.peers.insert(peer_id, tx);
-        self.notify_peer(peer_id, SyncMessage::QueryLastBlock {});
-    }
-
-    fn remove_peer(&mut self, peer_id: &usize) {
-        debug!("good bye peer: {}", peer_id);
-        self.peers.remove(peer_id);
-    }
-
-    fn received_block(&mut self, peer_id: usize, block: Block) {
-        if self.block_chain.add_block(block.clone()) {
-            self.notify_peers(SyncMessage::ResponseLastBlock { block }, Some(&peer_id));
-        } else if block.has_higher_index(self.block_chain.latest_block()) {
-            self.notify_peer(peer_id, SyncMessage::QueryBlockChain {});
-        }
-    }
-
-    fn received_block_chain(&mut self, peer_id: usize, blocks: Vec<Block>) {
-        if self.block_chain.replace_chain(blocks) {
-            self.notify_peers(
-                SyncMessage::ResponseLastBlock {
-                    block: self.block_chain.latest_block().clone(),
-                },
-                Some(&peer_id),
-            );
-        } else {
-            warn!("failed to replace block chain from {}", peer_id);
-        }
-    }
-
-    fn send_last_block(&self, peer_id: usize) {
-        self.peers.get(&peer_id).iter().for_each(|tx| {
-            if let Err(err) = tx.unbounded_send(SyncMessage::ResponseLastBlock {
-                block: self.block_chain.latest_block().clone(),
-            }) {
-                warn!("error sending msg to {}  {}", peer_id, err);
-            }
-        });
-    }
-
-    fn send_block_chain(&self, peer_id: usize) {
-        self.peers.get(&peer_id).iter().for_each(|tx| {
-            debug!("send block chain to {} peer", self.peers.len());
-            if let Err(err) = tx.unbounded_send(SyncMessage::ResponseBlockChain {
-                blocks: self.block_chain.blocks().clone(),
-            }) {
-                warn!("error sending msg to {}  {}", peer_id, err);
-            }
-        });
-    }
-
-    fn notify_peers(&self, msg: SyncMessage, exclude_peer_id: Option<&usize>) {
-        debug!("notify {} peers", self.peers.len());
-        self.peers
-            .iter()
-            .filter(|(peer_id, _)| match exclude_peer_id {
-                Some(excluded_id) => excluded_id != (*peer_id),
-                None => true,
-            })
-            .for_each(|(peer_id, tx)| {
-                if let Err(err) = tx.unbounded_send(msg.clone()) {
-                    warn!("error sending msg to {}  {}", peer_id, err);
-                }
-            });
-    }
-
-    fn notify_peer(&self, peer_id: usize, msg: SyncMessage) {
-        self.peers.get(&peer_id).iter().for_each(|tx| {
-            if let Err(err) = tx.unbounded_send(msg.clone()) {
-                warn!("error sending msg to {}  {}", peer_id, err);
-            }
-        });
-    }
-
-    fn peer_message_received(&mut self, peer_id: usize, msg: SyncMessage) {
-        debug!("peer {} msg {:?}", peer_id, msg);
-        match msg {
-            SyncMessage::QueryLastBlock() => {
-                self.send_last_block(peer_id);
-            }
-            SyncMessage::QueryBlockChain() => {
-                self.send_block_chain(peer_id);
-            }
-            SyncMessage::ResponseLastBlock { block } => self.received_block(peer_id, block),
-            SyncMessage::ResponseBlockChain { blocks } => {
-                self.received_block_chain(peer_id, blocks)
-            }
-        }
     }
 }
 
@@ -169,6 +44,7 @@ fn main() {
     let state = warp::any().map(move || state.clone());
     let blocks_index = warp::path("blocks").and(warp::path::end());
     let peers_index = warp::path("peers").and(warp::path::end());
+    let body_conten_length_limit = warp::body::content_length_limit(1024 * 16);
 
     let get_blocks = warp::get2()
         .and(blocks_index)
@@ -176,7 +52,7 @@ fn main() {
         .map(list_blocks);
     let post_block = warp::post2()
         .and(blocks_index)
-        .and(warp::body::content_length_limit(1024 * 16))
+        .and(body_conten_length_limit)
         .and(warp::body::json())
         .and(state.clone())
         .and_then(mine_block);
@@ -184,7 +60,7 @@ fn main() {
     //    let get_peers = get2().and(peers_index).and(state.clone()).map(list_peers);
     let post_peer = warp::post2()
         .and(peers_index)
-        .and(warp::body::content_length_limit(1024 * 16))
+        .and(body_conten_length_limit)
         .and(warp::body::json())
         .and(state.clone())
         .and_then(connect_to_peer);
@@ -202,7 +78,7 @@ fn main() {
 
 fn list_blocks(state: RCoinState) -> impl warp::Reply {
     let rcoin = state.lock().unwrap();
-    warp::reply::json(rcoin.block_chain.blocks())
+    warp::reply::json(rcoin.blocks())
 }
 
 fn mine_block(
@@ -312,5 +188,5 @@ fn peer_message_received(peer_id: usize, msg: String, state: &RCoinState) {
 
 fn peer_disconnected(peer_id: usize, state: &RCoinState) {
     // Stream closed up, so remove the peer
-    state.lock().unwrap().remove_peer(&peer_id);
+    state.lock().unwrap().remove_peer(peer_id);
 }
