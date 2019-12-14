@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn block_genesis() {
+    fn block_chain_genesis() {
         let block_chain = BlockChain::new();
         let genesis = block_chain.latest_block();
         assert_eq!(0, genesis.index);
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulated_difficulty() {
+    fn block_chain_accumulated_difficulty() {
         let mut block_chain = BlockChain::new();
 
         generate_n_blocks(&mut block_chain, DIFFICULTY_ADJUSTMENT_INTERVAL * 3 + 4);
@@ -312,6 +312,28 @@ mod tests {
                 + 2_u64.pow(3) * 4, // last four blocks: difficulty = 3
             accumulated_difficulty
         );
+    }
+
+    #[test]
+    fn block_chain_add_block() {
+        let mut block_chain1 = BlockChain::new();
+        let mut block_chain2 = BlockChain::new();
+        let mut block_chain3 = BlockChain::new();
+
+        let block1 = block_chain1.generate_next_block("data".to_string());
+        assert_eq!(true, block_chain2.add_block(block1.clone()));
+        assert_eq!(&block1, block_chain2.latest_block());
+
+        // the block 2 is missing
+        let block2 = block_chain1.generate_next_block("another_data".to_string());
+        assert_eq!(false, block_chain3.add_block(block2.clone()));
+
+        // invalid hash
+        let block3 = Block {
+            timestamp: 678,
+            ..block2
+        };
+        assert_eq!(false, block_chain2.add_block(block3.clone()));
     }
 
     fn generate_n_blocks(block_chain: &mut BlockChain, n: u32) {

@@ -7,17 +7,12 @@ use std::collections::HashMap;
 pub mod block_chain;
 pub mod error;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SyncMessage {
     QueryLastBlock(),
     QueryBlockChain(),
     ResponseLastBlock { block: Block },
     ResponseBlockChain { blocks: Vec<Block> },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BlockData {
-    data: String,
 }
 
 #[derive(Default)]
@@ -35,8 +30,8 @@ impl RCoin {
         self.block_chain.blocks()
     }
 
-    pub fn generate_next_block(&mut self, block_data: BlockData) {
-        let block = self.block_chain.generate_next_block(block_data.data);
+    pub fn generate_next_block(&mut self, block_data: String) {
+        let block = self.block_chain.generate_next_block(block_data);
         debug!("block mined: {:?}", block);
         self.notify_peers(SyncMessage::ResponseLastBlock { block }, None);
     }
@@ -48,7 +43,6 @@ impl RCoin {
 
     pub fn remove_peer(&mut self, peer_id: usize) {
         debug!("good bye peer: {}", peer_id);
-
         self.peers.remove(&peer_id);
     }
 
@@ -131,5 +125,86 @@ impl RCoin {
                 self.received_block_chain(peer_id, blocks)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RCoin, SyncMessage};
+    use futures::prelude::*;
+    use futures::{sync::mpsc, Stream};
+    use std::thread;
+
+    #[test]
+    fn should_query_last_block_when_a_peer_is_added() {
+        let (tx, rx) = mpsc::unbounded();
+
+        thread::spawn(|| {
+            let mut rcoin = RCoin::new();
+            rcoin.add_peer(1, tx);
+        });
+
+        let messages = rx.collect().wait();
+        assert_eq!(messages, Ok(vec![SyncMessage::QueryLastBlock {}]));
+    }
+
+    #[test]
+    fn should_notify_peer_when_a_block_is_generated() {
+        let (tx, rx) = mpsc::unbounded();
+        let computation = thread::spawn(move || {
+            let mut rcoin = RCoin::new();
+            rcoin.add_peer(1, tx);
+            rcoin.generate_next_block("stuff".to_string());
+            rcoin.block_chain.latest_block().clone()
+        });
+
+        let messages = rx.collect().wait();
+        let block = computation.join().unwrap();
+        assert_eq!(
+            messages,
+            Ok(vec![
+                SyncMessage::QueryLastBlock {},
+                SyncMessage::ResponseLastBlock { block }
+            ])
+        );
+    }
+
+    #[test]
+    fn should_send_last_block_when_a_peer_queries_it() {
+        let (tx1, rx1) = mpsc::unbounded();
+        let (tx2, rx2) = mpsc::unbounded();
+        let computation = thread::spawn(move || {
+            let mut rcoin = RCoin::new();
+            rcoin.add_peer(1, tx1);
+            rcoin.add_peer(2, tx2);
+            rcoin.generate_next_block("stuff".to_string());
+            rcoin.peer_message_received(1, SyncMessage::QueryLastBlock {});
+            rcoin.block_chain.latest_block().clone()
+        });
+        let block = computation.join().unwrap();
+
+        let messages1 = rx1.collect().wait();
+        assert_eq!(
+            messages1,
+            Ok(vec![
+                SyncMessage::QueryLastBlock {},
+                SyncMessage::ResponseLastBlock {
+                    block: block.clone()
+                },
+                SyncMessage::ResponseLastBlock {
+                    block: block.clone()
+                }
+            ])
+        );
+        let messages2 = rx2.collect().wait();
+        assert_eq!(
+            messages2,
+            Ok(vec![
+                SyncMessage::QueryLastBlock {},
+                SyncMessage::ResponseLastBlock {
+                    block: block.clone()
+                }
+            ])
+        );
     }
 }

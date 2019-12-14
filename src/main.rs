@@ -11,7 +11,7 @@ use warp::Filter;
 
 use rcoin::{
     error::{Error, Kind},
-    BlockData, RCoin, SyncMessage,
+    RCoin, SyncMessage,
 };
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -24,6 +24,11 @@ impl Peer {
     fn sync_url(&self) -> String {
         format!("ws://{}:{}/sync-ws", self.hostname, self.port)
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockData {
+    data: String,
 }
 
 #[derive(Debug, StructOpt)]
@@ -86,7 +91,7 @@ fn mine_block(
     state: RCoinState,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let mut rcoin = state.lock().unwrap();
-    rcoin.generate_next_block(block_data);
+    rcoin.generate_next_block(block_data.data);
     Ok(warp::http::StatusCode::CREATED)
 }
 
