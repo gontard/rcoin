@@ -12,7 +12,7 @@ pub enum SyncMessage {
     QueryLastBlock(),
     QueryBlockChain(),
     ResponseLastBlock { block: Block },
-    ResponseBlockChain { blocks: Vec<Block> },
+    ResponseBlockChain { block_chain: BlockChain },
 }
 
 #[derive(Default)]
@@ -54,8 +54,8 @@ impl RCoin {
         }
     }
 
-    pub fn received_block_chain(&mut self, peer_id: usize, blocks: Vec<Block>) {
-        if self.block_chain.replace_chain(blocks) {
+    pub fn received_block_chain(&mut self, peer_id: usize, block_chain: BlockChain) {
+        if self.block_chain.replace_chain(block_chain) {
             self.notify_peers(
                 SyncMessage::ResponseLastBlock {
                     block: self.block_chain.latest_block().clone(),
@@ -81,7 +81,7 @@ impl RCoin {
         self.peers.get(&peer_id).iter().for_each(|tx| {
             debug!("send block chain to {} peer", self.peers.len());
             if let Err(err) = tx.unbounded_send(SyncMessage::ResponseBlockChain {
-                blocks: self.block_chain.blocks().clone(),
+                block_chain: self.block_chain.clone(),
             }) {
                 warn!("error sending msg to {}  {}", peer_id, err);
             }
@@ -121,8 +121,8 @@ impl RCoin {
                 self.send_block_chain(peer_id);
             }
             SyncMessage::ResponseLastBlock { block } => self.received_block(peer_id, block),
-            SyncMessage::ResponseBlockChain { blocks } => {
-                self.received_block_chain(peer_id, blocks)
+            SyncMessage::ResponseBlockChain { block_chain } => {
+                self.received_block_chain(peer_id, block_chain)
             }
         }
     }

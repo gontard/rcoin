@@ -94,7 +94,7 @@ impl Block {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct BlockChain {
     vec: Vec<Block>,
 }
@@ -152,15 +152,16 @@ impl BlockChain {
         }
     }
 
-    pub fn replace_chain(&mut self, new_blocks: Vec<Block>) -> bool {
-        let is_valid = new_blocks.len() > self.vec.len()
-            && new_blocks.first() == self.vec.first()
-            && new_blocks
+    pub fn replace_chain(&mut self, new_chain: BlockChain) -> bool {
+        let is_valid = new_chain.accumulated_difficulty() > self.accumulated_difficulty()
+            && new_chain.vec.first() == self.vec.first()
+            && new_chain
+                .vec
                 .iter()
-                .zip(new_blocks.iter().skip(1))
+                .zip(new_chain.vec.iter().skip(1))
                 .all(|(prev, current)| prev.is_valid_next_block(current));
         if is_valid {
-            self.vec = new_blocks;
+            self.vec = new_chain.vec;
         }
         is_valid
     }
@@ -199,10 +200,10 @@ impl BlockChain {
         }
     }
 
-    pub fn accumulated_difficulty(&self) -> u64 {
-        self.blocks()
+    fn accumulated_difficulty(&self) -> u64 {
+        self.vec
             .iter()
-            .fold(0, |acc, block| acc + 2_u64.pow(block.difficulty.into()))
+            .fold(0, |acc, block| acc + 2_u64.pow(block.difficulty))
     }
 }
 
